@@ -5,6 +5,7 @@ import ChatList from "../components/ChatList";
 import ChatWindow from "../components/ChatWindow";
 import UserProfile from "../components/UserProfile";
 import axios from "axios";
+import { io } from "socket.io-client";
 import "../styles/Chat.css";
 
 export default function ChatPage() {
@@ -17,8 +18,30 @@ export default function ChatPage() {
   const [searchText, setSearchText] = useState("");
   const [usersList, setUsersList] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
+  const [socket, setSocket] = useState(null);
 
   const API_BASE_URL = "http://localhost:8000";
+
+  // Initialize socket.io client
+  useEffect(() => {
+    if (!token) return;
+    const s = io(API_BASE_URL, { auth: { token } });
+    setSocket(s);
+
+    s.on("connect", () => {
+      console.log("Socket connected", s.id);
+    });
+
+    s.on("connect_error", (err) => {
+      console.error("Socket connect error:", err.message);
+    });
+
+    return () => {
+      s.disconnect();
+      setSocket(null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
 
   const handleSelectConversation = (conversation) => {
     setSelectedConversation(conversation);
@@ -98,7 +121,11 @@ export default function ChatPage() {
         {/* Main Chat Area */}
         <div className="chat-main">
           {selectedConversation ? (
-            <ChatWindow conversation={selectedConversation} onMessageSent={() => setConversationsRefreshKey(k => k + 1)} />
+            <ChatWindow
+              conversation={selectedConversation}
+              onMessageSent={() => setConversationsRefreshKey(k => k + 1)}
+              socket={socket}
+            />
           ) : (
             <div className="no-chat-selected">
               <div className="welcome-message">

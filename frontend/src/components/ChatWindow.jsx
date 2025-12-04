@@ -1,13 +1,15 @@
 import { useState, useEffect, useContext, useRef } from "react";
-import axios from "axios";
 import { AuthContext } from "../context/AuthContext";
+import axios from "axios";
 
-export default function ChatWindow({ conversation, onMessageSent }) {
+export default function ChatWindow({ conversation, onMessageSent, socket }) {
   const { token, user } = useContext(AuthContext);
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState("");
   const [loading, setLoading] = useState(true);
+  const [otherTyping, setOtherTyping] = useState(false);
   const messagesEndRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
 
   const API_BASE_URL = "http://localhost:8000";
 
@@ -21,6 +23,45 @@ export default function ChatWindow({ conversation, onMessageSent }) {
       fetchMessages();
     }
   }, [conversation?._id]);
+
+  // Socket handlers: join conversation room and listen for messages/typing
+  useEffect(() => {
+    if (!socket || !conversation?._id) return;
+
+    // join room
+    socket.emit('joinConversation', conversation._id);
+
+    const onNewMessage = ({ conversationId, message }) => {
+      if (conversationId !== conversation._id) return;
+      setMessages((prev) => [...prev, message]);
+      if (typeof onMessageSent === 'function' && message.senderId._id === user?._id) {
+        onMessageSent(message);
+      }
+    };
+
+    const onTyping = ({ conversationId, userId }) => {
+      if (conversationId !== conversation._id) return;
+      if (userId === user?._id) return; // ignore our own typing echoes
+      setOtherTyping(true);
+    };
+
+    const onStopTyping = ({ conversationId, userId }) => {
+      if (conversationId !== conversation._id) return;
+      if (userId === user?._id) return;
+      setOtherTyping(false);
+    };
+
+    socket.on('newMessage', onNewMessage);
+    socket.on('typing', onTyping);
+    socket.on('stopTyping', onStopTyping);
+
+    return () => {
+      socket.off('newMessage', onNewMessage);
+      socket.off('typing', onTyping);
+      socket.off('stopTyping', onStopTyping);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [socket, conversation?._id]);
 
   useEffect(() => {
     scrollToBottom();
@@ -52,23 +93,38 @@ export default function ChatWindow({ conversation, onMessageSent }) {
 
     if (!newMessage.trim()) return;
 
-    try {
-      const response = await axios.post(
-        `${API_BASE_URL}/api/chat/conversations/${conversation._id}/messages`,
-        { text: newMessage },
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }
-      );
-
-      setMessages([...messages, response.data.data]);
-      setNewMessage("");
-      if (typeof onMessageSent === "function") onMessageSent(response.data.data);
-    } catch (error) {
-      console.error("Error sending message:", error);
+    // send via socket for real-time broadcast and persistence on server
+    if (socket && conversation?._id) {
+      socket.emit('sendMessage', { conversationId: conversation._id, text: newMessage });
+      setNewMessage('');
+      // clear our typing locally
+      socket.emit('stopTyping', { conversationId: conversation._id });
+    } else {
+      // fallback to REST
+      try {
+        const response = await axios.post(
+          `${API_BASE_URL}/api/chat/conversations/${conversation._id}/messages`,
+          { text: newMessage },
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        setMessages((prev) => [...prev, response.data.data]);
+        setNewMessage('');
+        if (typeof onMessageSent === 'function') onMessageSent(response.data.data);
+      } catch (error) {
+        console.error('Error sending message (fallback):', error);
+      }
     }
+  };
+
+  // handle typing local -> emit socket 'typing' and debounce 'stopTyping'
+  const handleInputChange = (e) => {
+    setNewMessage(e.target.value);
+    if (!socket || !conversation?._id) return;
+    socket.emit('typing', { conversationId: conversation._id });
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
+      socket.emit('stopTyping', { conversationId: conversation._id });
+    }, 2000); // local stopTyping after 2s of inactivity
   };
 
   if (!conversation) {
@@ -103,6 +159,7 @@ export default function ChatWindow({ conversation, onMessageSent }) {
         ) : messages.length === 0 ? (
           <div className="no-messages">
             <p>No messages yet. Say hello!</p>
+            {otherTyping && <div className="typing-indicator">{otherParticipant?.name} is typing...</div>}
           </div>
         ) : (
           messages.map((msg) => (
@@ -131,7 +188,7 @@ export default function ChatWindow({ conversation, onMessageSent }) {
         <input
           type="text"
           value={newMessage}
-          onChange={(e) => setNewMessage(e.target.value)}
+          onChange={handleInputChange}
           placeholder="Type a message..."
           className="message-input"
         />
